@@ -101,9 +101,16 @@ _dir_get_breadcrumb_path() {
    echo "$breadcrumb"
 }
 
-# Get the count of items in current level
+# Get the count of items in current level WITH virtual filesystem support
 _dir_get_item_count() {
    local path="$1"
+   
+   # Handle filesystem paths
+   if _dir_is_filesystem_path "$path"; then
+       _dir_fs_get_item_count "$path"
+       return
+   fi
+   
    local count=0
    local index=1
    
@@ -111,6 +118,11 @@ _dir_get_item_count() {
        ((count++))
        ((index++))
    done
+   
+   # Add virtual filesystem entry only at root level
+   if [[ -z "$path" ]]; then
+       ((count++))
+   fi
    
    echo "$count"
 }
@@ -138,6 +150,22 @@ _dir_has_groups() {
    return 1  # No groups
 }
 
+# Check if the selected index is the virtual filesystem entry
+_dir_is_virtual_filesystem_entry() {
+   local selected_index="$1"
+   
+   # Only at root level - count saved items
+   local saved_count=0
+   local saved_index=1
+   while [[ -n "${_dir_items["/$saved_index"]}" ]]; do
+       ((saved_count++))
+       ((saved_index++))
+   done
+   
+   # Virtual entry is always after all saved items
+   [[ $selected_index -eq $((saved_count + 1)) ]]
+}
+
 # Drain any pending input to avoid double-processing
 _dir_drain_input() {
    while read -t 0.01 -n 1 2>/dev/null; do
@@ -145,7 +173,7 @@ _dir_drain_input() {
    done
 }
 
-# Show comprehensive help screen
+# Show comprehensive help screen with virtual filesystem info
 _dir_show_help() {
    local path="$1"
    
@@ -156,7 +184,7 @@ _dir_show_help() {
    printf "${_DIR_COLOR_HEADER}============================${_DIR_COLOR_RESET}\n"
    echo
    
-   printf "${_DIR_COLOR_GROUP}Navigation:${_DIR_COLOR_RESET}\n"
+   printf "${_DIR_COLOR_GROUP}Navigation (Both Modes):${_DIR_COLOR_RESET}\n"
    printf "  ↑/k           Move selection up\n"
    printf "  ↓/j           Move selection down\n"
    printf "  Enter or →/l  Open selected item\n"
@@ -165,32 +193,51 @@ _dir_show_help() {
    printf "  G             Go to last item\n"
    printf "  1-9           Quick select by number\n"
    printf "  ESC           Cancel number mode / Go back\n"
-   echo
-   
-   printf "${_DIR_COLOR_GROUP}Commands:${_DIR_COLOR_RESET}\n"
-   printf "  a             Add current directory\n"
-   printf "  c             Clean invalid/duplicate entries\n"
-   printf "  d             Delete selected item\n"
-   printf "  e             Edit config file\n"
-   printf "  g             Create new group\n"
    printf "  v             Open directory in nvim\n"
    printf "  q             Quit\n"
    printf "  ?             Show this help\n"
    echo
    
-   printf "${_DIR_COLOR_GROUP}Number Mode:${_DIR_COLOR_RESET}\n"
+   printf "${_DIR_COLOR_GROUP}Saved Directories Commands:${_DIR_COLOR_RESET}\n"
+   printf "  a             Add current working directory\n"
+   printf "  c             Clean invalid/duplicate entries\n"
+   printf "  d             Delete selected item\n"
+   printf "  e             Edit config file\n"
+   printf "  g             Create new group\n"
+   echo
+   
+   printf "${_DIR_COLOR_GROUP}Filesystem Browser Commands:${_DIR_COLOR_RESET}\n"
+   printf "  b             Bookmark directory to saved locations\n"
+   printf "  Enter         CD to directory and exit browser\n"
+   printf "  →/l           Navigate only if directory has subdirs\n"
+   echo
+   
+   # Show virtual filesystem help only at root level of saved directories
+   if [[ -z "$path" ]] && ! _dir_is_filesystem_path "$path"; then
+       printf "${_DIR_COLOR_GROUP}Virtual Filesystem:${_DIR_COLOR_RESET}\n"
+       printf "  🗂️            Virtual filesystem browser (last entry at root)\n"
+       printf "  →/l on 🗂️     Enter filesystem mode starting at current directory\n"
+       echo
+   fi
+   
+   printf "${_DIR_COLOR_GROUP}Number Mode (Both Modes):${_DIR_COLOR_RESET}\n"
    printf "  Type digits to select item by number\n"
-   printf "  Enter         Navigate to selected number\n"
-   printf "  d             Delete item by number\n"
+   printf "  Enter         Navigate to/CD to selected number\n"
+   printf "  d             Delete item by number (saved dirs only)\n"
    printf "  v             Open item by number in nvim\n"
+   printf "  b             Bookmark item by number (filesystem only)\n"
    printf "  ESC           Cancel and restore selection\n"
    echo
    
-   printf "${_DIR_COLOR_GROUP}Display:${_DIR_COLOR_RESET}\n"
+   printf "${_DIR_COLOR_GROUP}Display Indicators:${_DIR_COLOR_RESET}\n"
    printf "  📁            Group (collection of items)\n"
    printf "  Directory     Individual directory path\n"
+   if [[ -z "$path" ]] && ! _dir_is_filesystem_path "$path"; then
+       printf "  🗂️            Virtual filesystem browser\n"
+   fi
+   printf "  (+)           Directory has subdirectories (filesystem)\n"
    printf "  ►             Current selection indicator\n"
-   printf "  (n)           Number of items in group\n"
+   printf "  (n)           Number of items in group (saved dirs)\n"
    echo
    
    printf "${_DIR_COLOR_SHORTCUT}Press any key to return...${_DIR_COLOR_RESET}"

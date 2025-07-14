@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Rendering and display functions for dir navigator
+# Rendering and display functions for dir navigator with virtual filesystem support
 
 # Update only the selection indicators without full redraw
 _dir_update_selection() {
@@ -10,20 +10,26 @@ _dir_update_selection() {
    local max_items="$4"
    local number_mode="${5:-false}"
    
+   # Handle filesystem paths
+   if _dir_is_filesystem_path "$path"; then
+       _dir_fs_update_selection "$old_index" "$new_index" "$path" "$max_items" "$number_mode"
+       return
+   fi
+   
    # Hide cursor during updates
    printf '\e[?25l'
    
    # Clear old selection (if valid)
    if [[ $old_index -gt 0 && $old_index -le $max_items ]]; then
        local old_line=$((_DIR_ITEM_START_LINE + old_index - 1))
-       printf '\e[%d;1H' "$old_line"  # Move to start of old line
-       printf '  '  # Replace indicator with spaces
+       printf '\e[%d;1H' "$old_line"
+       printf '  '
    fi
    
-   # Draw new selection with appropriate color (only if valid)
+   # Draw new selection (only if valid)
    if [[ $new_index -gt 0 && $new_index -le $max_items ]]; then
        local new_line=$((_DIR_ITEM_START_LINE + new_index - 1))
-       printf '\e[%d;1H' "$new_line"  # Move to start of new line
+       printf '\e[%d;1H' "$new_line"
        
        if [[ "$number_mode" == "true" ]]; then
            printf "${_DIR_COLOR_NUMBER_MODE}${_DIR_ICON_SELECTED}${_DIR_COLOR_RESET}"
@@ -41,11 +47,20 @@ _dir_render_full() {
    local path="$1"
    local selected_index="${2:-0}"
    
+   # Handle filesystem paths
+   if _dir_is_filesystem_path "$path"; then
+       _dir_fs_render_full "$path" "$selected_index"
+       return
+   fi
+   
    # Clear screen and hide cursor
    printf '\e[H\e[J\e[?25l'
    
-   # Render header
-   printf "${_DIR_COLOR_HEADER}Directory Navigator${_DIR_COLOR_RESET}\n"
+   # Get current working directory for display
+   local cwd_display=$(pwd | sed "s|^$HOME|~|")
+   
+   # Render header with cwd
+   printf "${_DIR_COLOR_HEADER}Directory Navigator${_DIR_COLOR_RESET} ${_DIR_COLOR_BREADCRUMB}(cwd: %s)${_DIR_COLOR_RESET}\n" "$cwd_display"
    printf "${_DIR_COLOR_HEADER}===================${_DIR_COLOR_RESET}\n"
    echo
    _DIR_HEADER_LINES=3
@@ -67,22 +82,29 @@ _dir_render_full() {
    local max_items=$(_dir_get_item_count "$path")
    _DIR_FOOTER_START_LINE=$((_DIR_ITEM_START_LINE + max_items + 1))
    
-   # Render minimal footer
+   # Render footer with context-appropriate commands
    echo
-   printf "${_DIR_COLOR_SHORTCUT}Press ? for help, q to quit${_DIR_COLOR_RESET}\n"
+   printf "${_DIR_COLOR_SHORTCUT}?=Help, q=Quit${_DIR_COLOR_RESET}\n"
    
    # Show cursor
    printf '\e[?25h'
 }
 
-# Render items without selection highlighting
+# Render items without selection highlighting WITH virtual filesystem support
 _dir_render_items() {
    local path="$1"
    local selected_index="${2:-0}"
+   
+   # Handle filesystem paths
+   if _dir_is_filesystem_path "$path"; then
+       _dir_fs_render_items "$path" "$selected_index"
+       return
+   fi
+   
    local index=1
    local has_groups=$(_dir_has_groups "$path"; echo $?)
    
-   # Iterate through items
+   # Iterate through saved items
    while [[ -n "${_dir_items["$path/$index"]}" || ( -z "$path" && -n "${_dir_items["/$index"]}" ) ]]; do
        local item_path
        if [[ -z "$path" ]]; then
@@ -133,6 +155,33 @@ _dir_render_items() {
        
        ((index++))
    done
+   
+   # Add virtual filesystem entry at root level
+   if [[ -z "$path" ]]; then
+       # Check if this is the selected item
+       if [[ $index -eq $selected_index ]]; then
+           if [[ "$_DIR_IN_NUMBER_MODE" == "true" ]]; then
+               printf "${_DIR_COLOR_NUMBER_MODE}${_DIR_ICON_SELECTED}${_DIR_COLOR_RESET} "
+           else
+               printf "${_DIR_ICON_SELECTED} "
+           fi
+       else
+           printf "  "
+       fi
+       
+       # Render virtual filesystem entry
+       local indicator=""
+       if [[ "$_DIR_USE_ICONS" == true ]]; then
+           indicator="🗂️"  # Different icon for filesystem browser
+       else
+           indicator="[FS]"
+       fi
+       
+       # Get current working directory for display
+       local cwd_display=$(pwd | sed "s|^$HOME|~|")
+       printf "${_DIR_COLOR_SHORTCUT}%d${_DIR_COLOR_RESET}  %s ${_DIR_COLOR_BREADCRUMB}%s (browse filesystem)${_DIR_COLOR_RESET}\n" \
+           "$index" "$indicator" "$cwd_display"
+   fi
 }
 
 # Show current directory level with optional selection highlighting

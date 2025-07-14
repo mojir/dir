@@ -113,21 +113,23 @@ _dir_fs_render_items() {
        
        # Show directory with number and check if it has subdirs
        local full_path="$system_path/$dir_name"
-       local has_subdirs=""
        
        # Check if this directory has subdirectories (for visual indication)
        if find "$full_path" -maxdepth 1 -type d ! -name ".*" ! -path "$full_path" -print -quit 2>/dev/null | grep -q .; then
-           has_subdirs=" ${_DIR_COLOR_GROUP}(+)${_DIR_COLOR_RESET}"
+           # Has subdirectories - show with (+) indicator
+           printf "${_DIR_COLOR_SHORTCUT}%d${_DIR_COLOR_RESET}  ${_DIR_COLOR_DIR}%s${_DIR_COLOR_RESET} ${_DIR_COLOR_GROUP}(+)${_DIR_COLOR_RESET}\n" \
+               "$index" "$dir_name"
+       else
+           # No subdirectories - show without indicator
+           printf "${_DIR_COLOR_SHORTCUT}%d${_DIR_COLOR_RESET}  ${_DIR_COLOR_DIR}%s${_DIR_COLOR_RESET}\n" \
+               "$index" "$dir_name"
        fi
-       
-       printf "${_DIR_COLOR_SHORTCUT}%d${_DIR_COLOR_RESET}  ${_DIR_COLOR_DIR}%s${_DIR_COLOR_RESET}%s\n" \
-           "$index" "$dir_name" "$has_subdirs"
        
        ((index++))
    done
 }
 
-# Navigate filesystem by index
+# Navigate filesystem by index - FIXED VERSION
 _dir_fs_handle_navigation_by_index() {
    local fs_path="$1"
    local index="$2"
@@ -156,24 +158,17 @@ _dir_fs_handle_navigation_by_index() {
    local selected_dir="${dirs[$((index - 1))]}"
    local target_path="$system_path/$selected_dir"
    
-   # Check if target has subdirectories
+   # FIXED: Always navigate deeper in filesystem mode, don't exit to cd
+   # Only cd and exit when explicitly requested (Enter key in a leaf directory)
    if _dir_fs_has_subdirs "$(_dir_system_to_fs_path "$target_path")"; then
-       # Navigate into the subdirectory
+       # Has subdirectories, navigate into it
        _dir_fs_navigate_level "$(_dir_system_to_fs_path "$target_path")"
        return $?
    else
-       # No subdirectories, cd to it and exit
-       if cd "$target_path" 2>/dev/null; then
-           local display_path=$(echo "$target_path" | sed "s|^$HOME|~|")
-           printf "${_DIR_COLOR_DIR}Changed to: %s${_DIR_COLOR_RESET}\n" "$display_path"
-           _DIR_EXIT_SCRIPT=true
-           return 0
-       else
-           printf "${_DIR_COLOR_RESET}Error: Cannot access directory %s${_DIR_COLOR_RESET}\n" "$target_path"
-           echo "Press any key to continue..."
-           read -n1 -s
-           return 2
-       fi
+       # No subdirectories - show empty directory in filesystem mode
+       # Don't cd automatically, let user decide with Enter or 'v'
+       _dir_fs_navigate_level "$(_dir_system_to_fs_path "$target_path")"
+       return $?
    fi
 }
 
@@ -197,7 +192,7 @@ _dir_fs_navigate_level() {
        while true; do
            printf '\e[%d;1H' "$_DIR_FOOTER_START_LINE"
            echo
-           printf "${_DIR_COLOR_SHORTCUT}No subdirectories. Press ? for help, q to quit${_DIR_COLOR_RESET}\n"
+           printf "${_DIR_COLOR_SHORTCUT}No subdirectories. ?=Help, q=Quit${_DIR_COLOR_RESET}\n"
            
            key=$(_dir_read_key)
            if [[ $? -ne 0 ]]; then
@@ -207,6 +202,20 @@ _dir_fs_navigate_level() {
            case "$key" in
                "ESC"|'q') return 0 ;;
                "LEFT"|'h') return 1 ;;  # Go back
+               $'') # Enter key - cd to current directory and exit
+                   local system_path=$(_dir_fs_to_system_path "$fs_path")
+                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
+                   if cd "$system_path" 2>/dev/null; then
+                       local display_path=$(echo "$system_path" | sed "s|^$HOME|~|")
+                       printf "${_DIR_COLOR_DIR}Changed to: %s${_DIR_COLOR_RESET}\n" "$display_path"
+                       _DIR_EXIT_SCRIPT=true
+                       return 0
+                   else
+                       printf "${_DIR_COLOR_RESET}Error: Cannot access directory${_DIR_COLOR_RESET}\n"
+                       echo "Press any key to continue..."
+                       read -n1 -s
+                   fi
+                   ;;
                '?') 
                    _dir_show_help "$fs_path"
                    _dir_fs_render_full "$fs_path" 1
@@ -214,11 +223,22 @@ _dir_fs_navigate_level() {
                    selected_index=1
                    _DIR_LAST_SELECTED=1
                    ;;
-               'a') 
-                   # Add current filesystem directory to saved locations
+               'b') 
+                   # Bookmark current filesystem directory to saved locations
                    local system_path=$(_dir_fs_to_system_path "$fs_path")
                    system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
                    _dir_add_filesystem_dir_to_saved "$system_path"
+                   ;;
+               'v')
+                   # Open current directory in nvim
+                   local system_path=$(_dir_fs_to_system_path "$fs_path")
+                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
+                   if [[ -d "$system_path" ]]; then
+                       _dir_cleanup
+                       nvim "$system_path"
+                       _DIR_EXIT_SCRIPT=true
+                       return 0
+                   fi
                    ;;
            esac
        done
@@ -281,7 +301,7 @@ _dir_fs_navigate_level() {
                    _DIR_LAST_KEY="$key"
                    continue
                    ;;
-               5) # Selection changed
+               5) # Selection changed - update our tracking
                    selected_index="$_DIR_NUMBER_TARGET_INDEX"
                    _DIR_LAST_SELECTED=$selected_index
                    _DIR_LAST_KEY="$key"
@@ -341,20 +361,41 @@ _dir_fs_navigate_level() {
                _DIR_LAST_SELECTED=$selected_index
                ;;
            
-           ""|$'\n'|$'\r')  # Enter key
-               _dir_fs_handle_navigation_by_index "$fs_path" "$selected_index"
-               local nav_result=$?
-               if [[ $nav_result -eq 0 ]]; then
-                   return 99  # Exit script completely
-               elif [[ $nav_result -eq 1 ]]; then
-                   # Came back from subdirectory
-                   _dir_fs_render_full "$fs_path" "$selected_index"
-                   _DIR_LAST_SELECTED=$selected_index
-                   max_items=$(_dir_fs_get_item_count "$fs_path")
+           "") # Enter key - cd to selected directory and exit
+               if [[ $max_items -gt 0 && $selected_index -gt 0 && $selected_index -le $max_items ]]; then
+                   local system_path=$(_dir_fs_to_system_path "$fs_path")
+                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
+                   
+                   # Get sorted list of subdirectories
+                   local dirs=()
+                   while IFS= read -r -d '' dir; do
+                       dirs+=("$(basename "$dir")")
+                   done < <(find "$system_path" -maxdepth 1 -type d ! -name ".*" ! -path "$system_path" -print0 2>/dev/null | sort -z)
+                   
+                   local selected_dir="${dirs[$((selected_index - 1))]}"
+                   local target_path="$system_path/$selected_dir"
+                   
+                   # cd to selected directory and exit
+                   if cd "$target_path" 2>/dev/null; then
+                       local display_path=$(echo "$target_path" | sed "s|^$HOME|~|")
+                       printf "${_DIR_COLOR_DIR}Changed to: %s${_DIR_COLOR_RESET}\n" "$display_path"
+                       _DIR_EXIT_SCRIPT=true
+                       return 0
+                   else
+                       printf "${_DIR_COLOR_RESET}Error: Cannot access directory %s${_DIR_COLOR_RESET}\n" "$target_path"
+                       echo "Press any key to continue..."
+                       read -n1 -s
+                   fi
                else
-                   _dir_fs_render_full "$fs_path" "$selected_index"
-                   _DIR_LAST_SELECTED=$selected_index
-                   max_items=$(_dir_fs_get_item_count "$fs_path")
+                   # No selection or empty directory - cd to current directory
+                   local system_path=$(_dir_fs_to_system_path "$fs_path")
+                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
+                   if cd "$system_path" 2>/dev/null; then
+                       local display_path=$(echo "$system_path" | sed "s|^$HOME|~|")
+                       printf "${_DIR_COLOR_DIR}Changed to: %s${_DIR_COLOR_RESET}\n" "$display_path"
+                       _DIR_EXIT_SCRIPT=true
+                       return 0
+                   fi
                fi
                ;;
 
@@ -379,19 +420,38 @@ _dir_fs_navigate_level() {
                ;;
            
            "RIGHT"|'l')
-               # Same as Enter for filesystem navigation
-               _dir_fs_handle_navigation_by_index "$fs_path" "$selected_index"
-               local nav_result=$?
-               if [[ $nav_result -eq 0 ]]; then
-                   return 99
-               elif [[ $nav_result -eq 1 ]]; then
-                   _dir_fs_render_full "$fs_path" "$selected_index"
-                   _DIR_LAST_SELECTED=$selected_index
-                   max_items=$(_dir_fs_get_item_count "$fs_path")
-               else
-                   _dir_fs_render_full "$fs_path" "$selected_index"
-                   _DIR_LAST_SELECTED=$selected_index
-                   max_items=$(_dir_fs_get_item_count "$fs_path")
+               # Only navigate if selected directory has subdirectories
+               if [[ $max_items -gt 0 && $selected_index -gt 0 && $selected_index -le $max_items ]]; then
+                   local system_path=$(_dir_fs_to_system_path "$fs_path")
+                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
+                   
+                   # Get sorted list of subdirectories
+                   local dirs=()
+                   while IFS= read -r -d '' dir; do
+                       dirs+=("$(basename "$dir")")
+                   done < <(find "$system_path" -maxdepth 1 -type d ! -name ".*" ! -path "$system_path" -print0 2>/dev/null | sort -z)
+                   
+                   local selected_dir="${dirs[$((selected_index - 1))]}"
+                   local target_path="$system_path/$selected_dir"
+                   
+                   # Only navigate if target has subdirectories
+                   if _dir_fs_has_subdirs "$(_dir_system_to_fs_path "$target_path")"; then
+                       _dir_fs_handle_navigation_by_index "$fs_path" "$selected_index"
+                       local nav_result=$?
+                       if [[ $nav_result -eq 0 ]]; then
+                           return 99  # Exit script completely (only if cd was executed)
+                       elif [[ $nav_result -eq 1 ]]; then
+                           # Came back from subdirectory
+                           _dir_fs_render_full "$fs_path" "$selected_index"
+                           _DIR_LAST_SELECTED=$selected_index
+                           max_items=$(_dir_fs_get_item_count "$fs_path")
+                       else
+                           _dir_fs_render_full "$fs_path" "$selected_index"
+                           _DIR_LAST_SELECTED=$selected_index
+                           max_items=$(_dir_fs_get_item_count "$fs_path")
+                       fi
+                   fi
+                   # If no subdirectories, do nothing (right arrow is ignored)
                fi
                ;;
 
@@ -399,23 +459,64 @@ _dir_fs_navigate_level() {
                return 1  # Go back
                ;;
            
-           'a')
-               # Add current filesystem directory to saved locations
-               local system_path=$(_dir_fs_to_system_path "$fs_path")
-               system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
-               _dir_add_filesystem_dir_to_saved "$system_path"
+           'b')
+               # Bookmark current filesystem directory to saved locations
+               if [[ $max_items -gt 0 && $selected_index -gt 0 && $selected_index -le $max_items ]]; then
+                   # Bookmark the selected subdirectory
+                   local system_path=$(_dir_fs_to_system_path "$fs_path")
+                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
+                   
+                   # Get sorted list of subdirectories
+                   local dirs=()
+                   while IFS= read -r -d '' dir; do
+                       dirs+=("$(basename "$dir")")
+                   done < <(find "$system_path" -maxdepth 1 -type d ! -name ".*" ! -path "$system_path" -print0 2>/dev/null | sort -z)
+                   
+                   local selected_dir="${dirs[$((selected_index - 1))]}"
+                   local target_path="$system_path/$selected_dir"
+                   _dir_add_filesystem_dir_to_saved "$target_path"
+               else
+                   # Bookmark current directory if no selection or empty directory
+                   local system_path=$(_dir_fs_to_system_path "$fs_path")
+                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
+                   _dir_add_filesystem_dir_to_saved "$system_path"
+               fi
+               # Redraw after bookmarking
+               _dir_fs_render_full "$fs_path" "$selected_index"
+               _DIR_LAST_SELECTED=$selected_index
                ;;
            
            'v')
                # Open current directory in nvim
-               local system_path=$(_dir_fs_to_system_path "$fs_path")
-               system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
-               
-               if [[ -d "$system_path" ]]; then
-                   _dir_cleanup
-                   nvim "$system_path"
-                   _DIR_EXIT_SCRIPT=true
-                   return 0
+               if [[ $max_items -gt 0 && $selected_index -gt 0 && $selected_index -le $max_items ]]; then
+                   local system_path=$(_dir_fs_to_system_path "$fs_path")
+                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
+                   
+                   # Get sorted list of subdirectories
+                   local dirs=()
+                   while IFS= read -r -d '' dir; do
+                       dirs+=("$(basename "$dir")")
+                   done < <(find "$system_path" -maxdepth 1 -type d ! -name ".*" ! -path "$system_path" -print0 2>/dev/null | sort -z)
+                   
+                   local selected_dir="${dirs[$((selected_index - 1))]}"
+                   local target_path="$system_path/$selected_dir"
+                   
+                   if [[ -d "$target_path" ]]; then
+                       _dir_cleanup
+                       nvim "$target_path"
+                       _DIR_EXIT_SCRIPT=true
+                       return 0
+                   fi
+               else
+                   # Open current directory if no selection
+                   local system_path=$(_dir_fs_to_system_path "$fs_path")
+                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
+                   if [[ -d "$system_path" ]]; then
+                       _dir_cleanup
+                       nvim "$system_path"
+                       _DIR_EXIT_SCRIPT=true
+                       return 0
+                   fi
                fi
                ;;
        esac
@@ -432,9 +533,12 @@ _dir_fs_render_full() {
    # Clear screen and hide cursor
    printf '\e[H\e[J\e[?25l'
    
-   # Render header
-   printf "${_DIR_COLOR_HEADER}Directory Navigator - Filesystem${_DIR_COLOR_RESET}\n"
-   printf "${_DIR_COLOR_HEADER}==================================${_DIR_COLOR_RESET}\n"
+   # Get current working directory for display
+   local cwd_display=$(pwd | sed "s|^$HOME|~|")
+   
+   # Render header with cwd (same as saved directories)
+   printf "${_DIR_COLOR_HEADER}Directory Navigator${_DIR_COLOR_RESET} ${_DIR_COLOR_BREADCRUMB}(cwd: %s)${_DIR_COLOR_RESET}\n" "$cwd_display"
+   printf "${_DIR_COLOR_HEADER}===================${_DIR_COLOR_RESET}\n"
    echo
    _DIR_HEADER_LINES=3
    
@@ -455,7 +559,7 @@ _dir_fs_render_full() {
    
    # Render footer
    echo
-   printf "${_DIR_COLOR_SHORTCUT}a=Add to saved, v=Open in nvim, ?=Help, q=Quit${_DIR_COLOR_RESET}\n"
+   printf "${_DIR_COLOR_SHORTCUT}?=Help, q=Quit${_DIR_COLOR_RESET}\n"
    
    # Show cursor
    printf '\e[?25h'
@@ -515,43 +619,54 @@ _dir_fs_handle_number_input() {
            if [[ $target_row -gt 0 && $target_row -le $max_items ]]; then
                _dir_fs_update_selection "$current_selection" "$target_row" "$fs_path" "$max_items" "true"
                _DIR_NUMBER_TARGET_INDEX=$target_row
-               return 5
+               return 5  # Selection changed
            else
                _dir_fs_update_selection "$current_selection" "0" "$fs_path" "$max_items" "true"
                _DIR_NUMBER_TARGET_INDEX=0
-               return 0
+               return 0  # Stay in number mode
            fi
            ;;
            
-       ""|$'\n'|$'\r')
+       ""|\n'|\r')
            if [[ -n "$_DIR_NUMBER_BUFFER" ]]; then
                local target_index="$_DIR_NUMBER_BUFFER"
                _dir_reset_number_mode
                
                if [[ $target_index -gt 0 && $target_index -le $max_items ]]; then
-                   _dir_fs_handle_navigation_by_index "$fs_path" "$target_index"
-                   local nav_result=$?
-                   if [[ "$_DIR_EXIT_SCRIPT" == "true" ]]; then
-                       return 0
-                   elif [[ $nav_result -eq 1 ]]; then
-                       _dir_fs_render_full "$fs_path" "$target_index"
-                       _DIR_LAST_SELECTED=$target_index
-                       return 2
+                   # For Enter key, cd to directory and exit
+                   local system_path=$(_dir_fs_to_system_path "$fs_path")
+                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
+                   
+                   # Get sorted list of subdirectories
+                   local dirs=()
+                   while IFS= read -r -d '' dir; do
+                       dirs+=("$(basename "$dir")")
+                   done < <(find "$system_path" -maxdepth 1 -type d ! -name ".*" ! -path "$system_path" -print0 2>/dev/null | sort -z)
+                   
+                   local selected_dir="${dirs[$((target_index - 1))]}"
+                   local target_path="$system_path/$selected_dir"
+                   
+                   if cd "$target_path" 2>/dev/null; then
+                       local display_path=$(echo "$target_path" | sed "s|^$HOME|~|")
+                       printf "${_DIR_COLOR_DIR}Changed to: %s${_DIR_COLOR_RESET}\n" "$display_path"
+                       _DIR_EXIT_SCRIPT=true
+                       return 99  # Exit completely
                    else
-                       return $nav_result
+                       printf "${_DIR_COLOR_RESET}Error: Cannot access directory %s${_DIR_COLOR_RESET}\n" "$target_path"
+                       echo "Press any key to continue..."
+                       read -n1 -s
+                       return 2
                    fi
                fi
            else
-               _dir_fs_handle_navigation_by_index "$fs_path" "$current_selection"
-               local nav_result=$?
-               if [[ "$_DIR_EXIT_SCRIPT" == "true" ]]; then
-                   return 0
-               elif [[ $nav_result -eq 1 ]]; then
-                   _dir_fs_render_full "$fs_path" "$current_selection"
-                   _DIR_LAST_SELECTED=$current_selection
-                   return 2
-               else
-                   return $nav_result
+               # No number buffer, cd to current directory
+               local system_path=$(_dir_fs_to_system_path "$fs_path")
+               system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
+               if cd "$system_path" 2>/dev/null; then
+                   local display_path=$(echo "$system_path" | sed "s|^$HOME|~|")
+                   printf "${_DIR_COLOR_DIR}Changed to: %s${_DIR_COLOR_RESET}\n" "$display_path"
+                   _DIR_EXIT_SCRIPT=true
+                   return 99  # Exit completely
                fi
            fi
            return 2
@@ -571,43 +686,95 @@ _dir_fs_handle_number_input() {
            return 2
            ;;
            
+       'b')
+           if [[ -n "$_DIR_NUMBER_BUFFER" ]]; then
+               local target_index="$_DIR_NUMBER_BUFFER"
+               _dir_reset_number_mode
+               
+               if [[ $target_index -gt 0 && $target_index -le $max_items ]]; then
+                   # Bookmark the target directory
+                   local system_path=$(_dir_fs_to_system_path "$fs_path")
+                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
+                   
+                   # Get sorted list of subdirectories
+                   local dirs=()
+                   while IFS= read -r -d '' dir; do
+                       dirs+=("$(basename "$dir")")
+                   done < <(find "$system_path" -maxdepth 1 -type d ! -name ".*" ! -path "$system_path" -print0 2>/dev/null | sort -z)
+                   
+                   local selected_dir="${dirs[$((target_index - 1))]}"
+                   local target_path="$system_path/$selected_dir"
+                   _dir_add_filesystem_dir_to_saved "$target_path"
+                   return 3  # Signal for full redraw
+               fi
+           else
+               # This should not happen during number input, but handle gracefully
+               return 2
+           fi
+           return 2
+           ;;
+           
        "ESC")
            _dir_reset_number_mode
            _DIR_NUMBER_TARGET_INDEX=$_DIR_ORIGINAL_SELECTION
-           return 6
+           return 6  # Signal to restore original selection
            ;;
            
        *)
            _dir_reset_number_mode
            _dir_fs_update_selection "$current_selection" "$current_selection" "$fs_path" "$max_items" "false"
-           return 1
+           return 1  # Signal to handle key normally
            ;;
    esac
 }
 
-# Add filesystem directory to saved locations
+# Add filesystem directory to saved locations (always to root level)
 _dir_add_filesystem_dir_to_saved() {
    local system_path="$1"
    local config_file="$HOME/.config/dir/dir.json"
    
+   # Always add to root level (empty path = root)
+   local root_path=""
+   
    # Check if directory already exists in root level
-   if _dir_check_duplicate "" "$system_path"; then
+   if _dir_check_duplicate "$root_path" "$system_path"; then
+       # Clear the area and show message
+       printf '\e[%d;1H\e[K' "$((_DIR_FOOTER_START_LINE + 1))"
+       printf '\e[%d;1H\e[K' "$((_DIR_FOOTER_START_LINE + 2))"
+       printf '\e[%d;1H' "$((_DIR_FOOTER_START_LINE + 1))"
        printf "${_DIR_COLOR_GROUP}Directory already exists in saved locations!${_DIR_COLOR_RESET}\n"
-       echo "Press any key to continue..."
+       printf "Press any key to continue..."
        read -n1 -s
+       # Clear the message area
+       printf '\e[%d;1H\e[K' "$((_DIR_FOOTER_START_LINE + 1))"
+       printf '\e[%d;1H\e[K' "$((_DIR_FOOTER_START_LINE + 2))"
        return
    fi
    
    # Add directory to JSON root level and refresh
-   if _dir_add_to_json "" "$system_path" "$config_file"; then
+   if _dir_add_to_json "$root_path" "$system_path" "$config_file"; then
        # Re-parse JSON to update in-memory arrays
        _dir_parse_json "$config_file"
+       # Clear the area and show success message
+       printf '\e[%d;1H\e[K' "$((_DIR_FOOTER_START_LINE + 1))"
+       printf '\e[%d;1H\e[K' "$((_DIR_FOOTER_START_LINE + 2))"
+       printf '\e[%d;1H' "$((_DIR_FOOTER_START_LINE + 1))"
        printf "${_DIR_COLOR_DIR}Added to saved locations: %s${_DIR_COLOR_RESET}\n" "$(echo "$system_path" | sed "s|^$HOME|~|")"
-       echo "Press any key to continue..."
+       printf "Press any key to continue..."
        read -n1 -s
+       # Clear the message area
+       printf '\e[%d;1H\e[K' "$((_DIR_FOOTER_START_LINE + 1))"
+       printf '\e[%d;1H\e[K' "$((_DIR_FOOTER_START_LINE + 2))"
    else
+       # Clear the area and show error message
+       printf '\e[%d;1H\e[K' "$((_DIR_FOOTER_START_LINE + 1))"
+       printf '\e[%d;1H\e[K' "$((_DIR_FOOTER_START_LINE + 2))"
+       printf '\e[%d;1H' "$((_DIR_FOOTER_START_LINE + 1))"
        printf "${_DIR_COLOR_RESET}Error: Failed to add directory${_DIR_COLOR_RESET}\n"
-       echo "Press any key to continue..."
+       printf "Press any key to continue..."
        read -n1 -s
+       # Clear the message area
+       printf '\e[%d;1H\e[K' "$((_DIR_FOOTER_START_LINE + 1))"
+       printf '\e[%d;1H\e[K' "$((_DIR_FOOTER_START_LINE + 2))"
    fi
 }

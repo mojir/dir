@@ -13,7 +13,6 @@ _dir_init_constants() {
    _DIR_COLOR_HEADER='\033[1;36m'       # Bold cyan for headers
    _DIR_COLOR_SELECTED='\033[1;47;30m'  # Bold white background, black text for selection
    _DIR_COLOR_SELECTED_GROUP='\033[1;44;37m'  # Bold blue background, white text for selected groups
-   _DIR_COLOR_NUMBER_MODE='\033[1;31m'  # Bold red for number input mode
 
    # Icons/indicators
    _DIR_ICON_GROUP='📁'    # Clipboard icon for groups (collections)
@@ -44,6 +43,159 @@ _dir_init_constants() {
    
    # Key tracking for multi-key commands
    _DIR_LAST_KEY=""
+   
+   # Initialize scrolling state
+   _dir_init_scrolling
+}
+
+# Initialize scrolling state variables
+_dir_init_scrolling() {
+    _DIR_VIEWPORT_START=1      # First visible item (1-based)
+    _DIR_VIEWPORT_SIZE=10      # Will be calculated based on terminal height
+    _DIR_SCROLL_OFFSET=0       # For fine positioning
+    
+    # Calculate actual viewport size based on terminal height
+    local terminal_height=$(tput lines 2>/dev/null || echo 24)
+    local header_lines=5       # Title + separator + breadcrumb + spacing
+    local footer_lines=3       # Spacing + help text + input area
+    local available_height=$((terminal_height - header_lines - footer_lines))
+    
+    # Minimum viewport size
+    if [[ $available_height -lt 5 ]]; then
+        _DIR_VIEWPORT_SIZE=5
+    else
+        _DIR_VIEWPORT_SIZE=$available_height
+    fi
+}
+
+# Calculate center position for viewport (with even/odd logic)
+_dir_get_center_position() {
+    local viewport_size="$1"
+    echo $(((viewport_size / 2) + 1))
+}
+
+# Check if item index is within current viewport
+_dir_is_in_viewport() {
+    local item_index="$1"
+    local viewport_end=$((_DIR_VIEWPORT_START + _DIR_VIEWPORT_SIZE - 1))
+    
+    [[ $item_index -ge $_DIR_VIEWPORT_START && $item_index -le $viewport_end ]]
+}
+
+# Center viewport on target item
+_dir_center_viewport_on() {
+    local target_index="$1"
+    local max_items="$2"
+    
+    local center_pos=$(_dir_get_center_position "$_DIR_VIEWPORT_SIZE")
+    local new_start=$((target_index - center_pos + 1))
+    
+    # Clamp to valid range
+    if [[ $new_start -lt 1 ]]; then
+        new_start=1
+    elif [[ $((new_start + _DIR_VIEWPORT_SIZE - 1)) -gt $max_items ]]; then
+        new_start=$((max_items - _DIR_VIEWPORT_SIZE + 1))
+        if [[ $new_start -lt 1 ]]; then
+            new_start=1
+        fi
+    fi
+    
+    _DIR_VIEWPORT_START=$new_start
+}
+
+# Scroll viewport by half-screen in given direction
+_dir_scroll_half_screen() {
+    local direction="$1"  # "up" or "down"
+    local max_items="$2"
+    local current_selection="$3"
+    
+    local half_screen=$((_DIR_VIEWPORT_SIZE / 2))
+    if [[ $half_screen -lt 1 ]]; then
+        half_screen=1
+    fi
+    
+    if [[ "$direction" == "down" ]]; then
+        local new_start=$((_DIR_VIEWPORT_START + half_screen))
+        local max_start=$((max_items - _DIR_VIEWPORT_SIZE + 1))
+        if [[ $max_start -lt 1 ]]; then
+            max_start=1
+        fi
+        if [[ $new_start -gt $max_start ]]; then
+            new_start=$max_start
+        fi
+        _DIR_VIEWPORT_START=$new_start
+        
+        # Adjust selection to stay in center of new viewport
+        local center_pos=$(_dir_get_center_position "$_DIR_VIEWPORT_SIZE")
+        local new_selection=$((_DIR_VIEWPORT_START + center_pos - 1))
+        if [[ $new_selection -gt $max_items ]]; then
+            new_selection=$max_items
+        fi
+        echo "$new_selection"
+        
+    elif [[ "$direction" == "up" ]]; then
+        local new_start=$((_DIR_VIEWPORT_START - half_screen))
+        if [[ $new_start -lt 1 ]]; then
+            new_start=1
+        fi
+        _DIR_VIEWPORT_START=$new_start
+        
+        # Adjust selection to stay in center of new viewport
+        local center_pos=$(_dir_get_center_position "$_DIR_VIEWPORT_SIZE")
+        local new_selection=$((_DIR_VIEWPORT_START + center_pos - 1))
+        if [[ $new_selection -lt 1 ]]; then
+            new_selection=1
+        fi
+        echo "$new_selection"
+    fi
+}
+
+# Smart scroll management - decides whether to scroll and how
+_dir_smart_scroll() {
+    local target_index="$1"
+    local max_items="$2"
+    local scroll_reason="$3"  # "jump", "arrow", "number"
+    
+    case "$scroll_reason" in
+        "jump"|"number")
+            # For jumps (gg, G, number+enter), always center if out of view
+            if ! _dir_is_in_viewport "$target_index"; then
+                _dir_center_viewport_on "$target_index" "$max_items"
+            fi
+            ;;
+        "arrow")
+            # For arrow movement, only scroll if moving outside viewport
+            if ! _dir_is_in_viewport "$target_index"; then
+                # Determine direction and scroll half-screen
+                local viewport_end=$((_DIR_VIEWPORT_START + _DIR_VIEWPORT_SIZE - 1))
+                if [[ $target_index -gt $viewport_end ]]; then
+                    # Moving down beyond viewport
+                    local new_selection=$(_dir_scroll_half_screen "down" "$max_items" "$target_index")
+                    echo "$new_selection"
+                    return
+                elif [[ $target_index -lt $_DIR_VIEWPORT_START ]]; then
+                    # Moving up beyond viewport  
+                    local new_selection=$(_dir_scroll_half_screen "up" "$max_items" "$target_index")
+                    echo "$new_selection"
+                    return
+                fi
+            fi
+            # If within viewport or no scroll needed, return original target
+            echo "$target_index"
+            ;;
+    esac
+}
+
+# Get visible item indices for current viewport
+_dir_get_visible_range() {
+    local max_items="$1"
+    local viewport_end=$((_DIR_VIEWPORT_START + _DIR_VIEWPORT_SIZE - 1))
+    
+    if [[ $viewport_end -gt $max_items ]]; then
+        viewport_end=$max_items
+    fi
+    
+    echo "$_DIR_VIEWPORT_START $viewport_end"
 }
 
 # Cleanup function to restore terminal state
@@ -198,6 +350,16 @@ _dir_show_help() {
    printf "  ?             Show this help\n"
    echo
    
+   printf "${_DIR_COLOR_GROUP}Number Commands (Vim-like):${_DIR_COLOR_RESET}\n"
+   printf "  5↓/5j         Move down 5 items (no wrap)\n"
+   printf "  3↑/3k         Move up 3 items (no wrap)\n"
+   printf "  15g           Jump to item 15 (absolute)\n"
+   printf "  50Enter       Jump to item 50 and navigate/CD\n"
+   printf "  12d           Delete item 12 (saved dirs only)\n"
+   printf "  8v            Open item 8 in nvim\n"
+   printf "  7b            Bookmark item 7 (filesystem only)\n"
+   echo
+   
    printf "${_DIR_COLOR_GROUP}Saved Directories Commands:${_DIR_COLOR_RESET}\n"
    printf "  a             Add current working directory\n"
    printf "  c             Clean invalid/duplicate entries\n"
@@ -238,6 +400,7 @@ _dir_show_help() {
    printf "  (+)           Directory has subdirectories (filesystem)\n"
    printf "  ►             Current selection indicator\n"
    printf "  (n)           Number of items in group (saved dirs)\n"
+   printf "  ...           More items above/below current view\n"
    echo
    
    printf "${_DIR_COLOR_SHORTCUT}Press any key to return...${_DIR_COLOR_RESET}"

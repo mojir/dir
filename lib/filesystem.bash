@@ -76,10 +76,11 @@ _dir_fs_get_breadcrumb_path() {
    echo "Filesystem → $display_path"
 }
 
-# Render filesystem items
-_dir_fs_render_items() {
+# Render filesystem items with viewport support
+_dir_fs_render_items_with_viewport() {
    local fs_path="$1"
    local selected_index="${2:-0}"
+   local max_items="$3"
    local system_path=$(_dir_fs_to_system_path "$fs_path")
    
    # Expand ~ if present
@@ -91,22 +92,31 @@ _dir_fs_render_items() {
        return
    fi
    
+   # Get visible range
+   local range=($(_dir_get_visible_range "$max_items"))
+   local visible_start=${range[0]}
+   local visible_end=${range[1]}
+   
+   # Show scroll indicator for items above
+   if [[ $visible_start -gt 1 ]]; then
+       printf "  ${_DIR_COLOR_BREADCRUMB}... (%d more above)${_DIR_COLOR_RESET}\n" $((visible_start - 1))
+   fi
+   
    # Get sorted list of subdirectories
    local dirs=()
    while IFS= read -r -d '' dir; do
        dirs+=("$(basename "$dir")")
    done < <(find "$system_path" -maxdepth 1 -type d ! -name ".*" ! -path "$system_path" -print0 2>/dev/null | sort -z)
    
-   # Render each directory
-   local index=1
-   for dir_name in "${dirs[@]}"; do
+   # Render visible items only
+   local index=$visible_start
+   while [[ $index -le $visible_end && $index -le ${#dirs[@]} ]]; do
+       local dir_name="${dirs[$((index - 1))]}"
+       
        # Check for selection
        if [[ $index -eq $selected_index ]]; then
-           if [[ "$_DIR_IN_NUMBER_MODE" == "true" ]]; then
-               printf "${_DIR_COLOR_NUMBER_MODE}${_DIR_ICON_SELECTED}${_DIR_COLOR_RESET} "
-           else
-               printf "${_DIR_ICON_SELECTED} "
-           fi
+           # Always use normal selection indicator - no number mode styling
+           printf "${_DIR_ICON_SELECTED} "
        else
            printf "  "
        fi
@@ -127,9 +137,23 @@ _dir_fs_render_items() {
        
        ((index++))
    done
+   
+   # Show scroll indicator for items below
+   if [[ $visible_end -lt $max_items ]]; then
+       printf "  ${_DIR_COLOR_BREADCRUMB}... (%d more below)${_DIR_COLOR_RESET}\n" $((max_items - visible_end))
+   fi
 }
 
-# Navigate filesystem by index - FIXED VERSION
+# Legacy render function - redirect to viewport version
+_dir_fs_render_items() {
+   local fs_path="$1"
+   local selected_index="${2:-0}"
+   local max_items=$(_dir_fs_get_item_count "$fs_path")
+   
+   _dir_fs_render_items_with_viewport "$fs_path" "$selected_index" "$max_items"
+}
+
+# Navigate filesystem by index with enhanced scrolling
 _dir_fs_handle_navigation_by_index() {
    local fs_path="$1"
    local index="$2"
@@ -158,21 +182,128 @@ _dir_fs_handle_navigation_by_index() {
    local selected_dir="${dirs[$((index - 1))]}"
    local target_path="$system_path/$selected_dir"
    
-   # FIXED: Always navigate deeper in filesystem mode, don't exit to cd
-   # Only cd and exit when explicitly requested (Enter key in a leaf directory)
+   # Always navigate deeper in filesystem mode, don't exit to cd
    if _dir_fs_has_subdirs "$(_dir_system_to_fs_path "$target_path")"; then
        # Has subdirectories, navigate into it
        _dir_fs_navigate_level "$(_dir_system_to_fs_path "$target_path")"
        return $?
    else
        # No subdirectories - show empty directory in filesystem mode
-       # Don't cd automatically, let user decide with Enter or 'v'
        _dir_fs_navigate_level "$(_dir_system_to_fs_path "$target_path")"
        return $?
    fi
 }
 
-# Main filesystem navigation function
+# Enhanced filesystem update selection with viewport support
+_dir_fs_update_selection() {
+   local old_index="$1"
+   local new_index="$2"
+   local fs_path="$3"
+   local max_items="$4"
+   local number_mode="${5:-false}"
+   
+   # Hide cursor during updates
+   printf '\e[?25l'
+   
+   # Get visible range
+   local range=($(_dir_get_visible_range "$max_items"))
+   local visible_start=${range[0]}
+   local visible_end=${range[1]}
+   
+   # Calculate line positions within viewport
+   local viewport_offset=0
+   if [[ $visible_start -gt 1 ]]; then
+       viewport_offset=1  # Account for "... (X more above)" line
+   fi
+   
+   # Clear old selection (if valid and visible)
+   if [[ $old_index -gt 0 && $old_index -le $max_items ]]; then
+       if [[ $old_index -ge $visible_start && $old_index -le $visible_end ]]; then
+           local old_line=$((_DIR_ITEM_START_LINE + viewport_offset + old_index - visible_start))
+           printf '\e[%d;1H' "$old_line"
+           printf '  '
+       fi
+   fi
+   
+   # Draw new selection (only if valid and visible)
+   if [[ $new_index -gt 0 && $new_index -le $max_items ]]; then
+       if [[ $new_index -ge $visible_start && $new_index -le $visible_end ]]; then
+           local new_line=$((_DIR_ITEM_START_LINE + viewport_offset + new_index - visible_start))
+           printf '\e[%d;1H' "$new_line"
+           
+           # Always use normal selection indicator - no special number mode styling
+           printf "${_DIR_ICON_SELECTED}"
+       fi
+   fi
+   
+   # Position cursor right after the footer text line
+   printf '\e[%d;1H\e[?25h' "$((_DIR_FOOTER_START_LINE + 1))"
+}
+
+# Render full filesystem view with viewport support
+_dir_fs_render_full() {
+   local fs_path="$1"
+   local selected_index="${2:-0}"
+   
+   # Clear screen and hide cursor
+   printf '\e[H\e[J\e[?25l'
+   
+   # Get current working directory for display
+   local cwd_display=$(pwd | sed "s|^$HOME|~|")
+   
+   # Render header with cwd (same as saved directories)
+   printf "${_DIR_COLOR_HEADER}Directory Navigator${_DIR_COLOR_RESET} ${_DIR_COLOR_BREADCRUMB}(cwd: %s)${_DIR_COLOR_RESET}\n" "$cwd_display"
+   printf "${_DIR_COLOR_HEADER}===================${_DIR_COLOR_RESET}\n"
+   echo
+   _DIR_HEADER_LINES=3
+   
+   # Render breadcrumb
+   printf "${_DIR_COLOR_BREADCRUMB}${_DIR_ICON_ARROW} %s${_DIR_COLOR_RESET}\n" "$(_dir_fs_get_breadcrumb_path "$fs_path")"
+   echo
+   _DIR_HEADER_LINES=$(((_DIR_HEADER_LINES + 2)))
+   
+   # Track where items start
+   _DIR_ITEM_START_LINE=$((_DIR_HEADER_LINES + 1))
+   
+   # Get total item count and ensure viewport is properly positioned
+   local max_items=$(_dir_fs_get_item_count "$fs_path")
+   
+   # Adjust viewport if selection is out of bounds
+   if [[ $selected_index -gt 0 ]]; then
+       if ! _dir_is_in_viewport "$selected_index"; then
+           _dir_center_viewport_on "$selected_index" "$max_items"
+       fi
+   fi
+   
+   # Render filesystem items with viewport
+   _dir_fs_render_items_with_viewport "$fs_path" "$selected_index" "$max_items"
+   
+   # Calculate footer position based on what was actually rendered
+   local range=($(_dir_get_visible_range "$max_items"))
+   local visible_start=${range[0]}
+   local visible_end=${range[1]}
+   local visible_count=$((visible_end - visible_start + 1))
+   
+   # Add space for scroll indicators
+   local scroll_indicator_lines=0
+   if [[ $visible_start -gt 1 ]]; then
+       ((scroll_indicator_lines++))
+   fi
+   if [[ $visible_end -lt $max_items ]]; then
+       ((scroll_indicator_lines++))
+   fi
+   
+   _DIR_FOOTER_START_LINE=$((_DIR_ITEM_START_LINE + visible_count + scroll_indicator_lines + 1))
+   
+   # Render footer
+   echo
+   printf "${_DIR_COLOR_SHORTCUT}?=Help, q=Quit${_DIR_COLOR_RESET}\n"
+   
+   # Show cursor
+   printf '\e[?25h'
+}
+
+# Main filesystem navigation function with enhanced scrolling
 _dir_fs_navigate_level() {
    local fs_path="$1"
    local mode="normal"
@@ -183,7 +314,10 @@ _dir_fs_navigate_level() {
    _dir_reset_number_mode
    _DIR_LAST_KEY=""
    
-   # Initial full render
+   # Initialize viewport for this filesystem level
+   _dir_init_scrolling
+   
+   # Initial full render with smart viewport positioning
    _dir_fs_render_full "$fs_path" "$selected_index"
    _DIR_LAST_SELECTED=$selected_index
    
@@ -256,13 +390,13 @@ _dir_fs_navigate_level() {
            continue
        fi
        
-       # Handle number input for filesystem navigation
+       # Handle number input for filesystem navigation with enhanced scrolling
        if [[ "$_DIR_IN_NUMBER_MODE" == "true" || "$key" =~ [0-9] ]]; then
-           _dir_fs_handle_number_input "$key" "$fs_path" "$selected_index" "$max_items"
+           _dir_fs_handle_number_input_enhanced "$key" "$fs_path" "$selected_index" "$max_items"
            local result=$?
            
            case $result in
-               0) _DIR_LAST_KEY="$key"; continue ;;
+               0) _DIR_LAST_KEY="$key"; continue ;;  # Stay in number mode, no visual changes
                1) ;;  # Handle key normally
                2) _DIR_LAST_KEY="$key"; continue ;;
                3) # Full redraw needed
@@ -278,38 +412,43 @@ _dir_fs_navigate_level() {
                    continue
                    ;;
                4) # Handle 'v' on current selection
-                   local system_path=$(_dir_fs_to_system_path "$fs_path")
-                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
-                   
-                   # Get sorted list of subdirectories
-                   local dirs=()
-                   while IFS= read -r -d '' dir; do
-                       dirs+=("$(basename "$dir")")
-                   done < <(find "$system_path" -maxdepth 1 -type d ! -name ".*" ! -path "$system_path" -print0 2>/dev/null | sort -z)
-                   
-                   if [[ $selected_index -gt 0 && $selected_index -le ${#dirs[@]} ]]; then
-                       local selected_dir="${dirs[$((selected_index - 1))]}"
-                       local target_path="$system_path/$selected_dir"
-                       
-                       if [[ -d "$target_path" ]]; then
-                           _dir_cleanup
-                           nvim "$target_path"
-                           _DIR_EXIT_SCRIPT=true
-                           return 0
-                       fi
+                   _dir_fs_handle_vim_action "$fs_path" "$selected_index"
+                   if [[ "$_DIR_EXIT_SCRIPT" == "true" ]]; then
+                       return 0
                    fi
                    _DIR_LAST_KEY="$key"
                    continue
                    ;;
-               5) # Selection changed - update our tracking
+               7) # Number + directional movement
+                   local old_viewport_start=$_DIR_VIEWPORT_START
                    selected_index="$_DIR_NUMBER_TARGET_INDEX"
+                   
+                   # Check if viewport changed (scrolling occurred)
+                   if [[ $_DIR_VIEWPORT_START -ne $old_viewport_start ]]; then
+                       # Full re-render needed due to scrolling
+                       _dir_fs_render_full "$fs_path" "$selected_index"
+                   else
+                       # Just update selection indicator
+                       _dir_fs_update_selection "$_DIR_LAST_SELECTED" "$selected_index" "$fs_path" "$max_items" "false"
+                   fi
+                   
                    _DIR_LAST_SELECTED=$selected_index
                    _DIR_LAST_KEY="$key"
                    continue
                    ;;
-               6) # Escape - restore selection
+               8) # Absolute positioning (number + g)
+                   local old_viewport_start=$_DIR_VIEWPORT_START
                    selected_index="$_DIR_NUMBER_TARGET_INDEX"
-                   _dir_fs_update_selection "$_DIR_LAST_SELECTED" "$selected_index" "$fs_path" "$max_items" "false"
+                   
+                   # Check if viewport changed (scrolling occurred)
+                   if [[ $_DIR_VIEWPORT_START -ne $old_viewport_start ]]; then
+                       # Full re-render needed due to scrolling
+                       _dir_fs_render_full "$fs_path" "$selected_index"
+                   else
+                       # Just update selection indicator
+                       _dir_fs_update_selection "$_DIR_LAST_SELECTED" "$selected_index" "$fs_path" "$max_items" "false"
+                   fi
+                   
                    _DIR_LAST_SELECTED=$selected_index
                    _DIR_LAST_KEY="$key"
                    continue
@@ -335,9 +474,9 @@ _dir_fs_navigate_level() {
            
            'g')
                if [[ "$_DIR_LAST_KEY" == "g" ]]; then
-                   # gg - go to first item
+                   # gg - go to first item with smart scrolling
                    if [[ $max_items -gt 0 ]]; then
-                       local new_index=1
+                       local new_index=$(_dir_handle_jump_navigation "first" "$max_items")
                        _dir_fs_update_selection "$_DIR_LAST_SELECTED" "$new_index" "$fs_path" "$max_items" "false"
                        selected_index=$new_index
                        _DIR_LAST_SELECTED=$selected_index
@@ -346,9 +485,9 @@ _dir_fs_navigate_level() {
                ;;
            
            'G')
-               # G - go to last item
+               # G - go to last item with smart scrolling
                if [[ $max_items -gt 0 ]]; then
-                   local new_index=$max_items
+                   local new_index=$(_dir_handle_jump_navigation "last" "$max_items")
                    _dir_fs_update_selection "$_DIR_LAST_SELECTED" "$new_index" "$fs_path" "$max_items" "false"
                    selected_index=$new_index
                    _DIR_LAST_SELECTED=$selected_index
@@ -400,21 +539,37 @@ _dir_fs_navigate_level() {
                ;;
 
            "UP"|'k')
-               local new_index=$((selected_index - 1))
-               if [[ $new_index -lt 1 ]]; then
-                   new_index=$max_items
+               # Use enhanced arrow navigation with smart scrolling
+               local old_viewport_start=$_DIR_VIEWPORT_START
+               local new_index=$(_dir_handle_arrow_navigation "$key" "$selected_index" "$max_items" "$fs_path")
+               
+               # Check if viewport changed (scrolling occurred)
+               if [[ $_DIR_VIEWPORT_START -ne $old_viewport_start ]]; then
+                   # Full re-render needed due to scrolling
+                   _dir_fs_render_full "$fs_path" "$new_index"
+               else
+                   # Just update selection indicator
+                   _dir_fs_update_selection "$_DIR_LAST_SELECTED" "$new_index" "$fs_path" "$max_items" "false"
                fi
-               _dir_fs_update_selection "$_DIR_LAST_SELECTED" "$new_index" "$fs_path" "$max_items" "false"
+               
                selected_index=$new_index
                _DIR_LAST_SELECTED=$selected_index
                ;;
            
            "DOWN"|'j')
-               local new_index=$((selected_index + 1))
-               if [[ $new_index -gt $max_items ]]; then
-                   new_index=1
+               # Use enhanced arrow navigation with smart scrolling
+               local old_viewport_start=$_DIR_VIEWPORT_START
+               local new_index=$(_dir_handle_arrow_navigation "$key" "$selected_index" "$max_items" "$fs_path")
+               
+               # Check if viewport changed (scrolling occurred)
+               if [[ $_DIR_VIEWPORT_START -ne $old_viewport_start ]]; then
+                   # Full re-render needed due to scrolling
+                   _dir_fs_render_full "$fs_path" "$new_index"
+               else
+                   # Just update selection indicator
+                   _dir_fs_update_selection "$_DIR_LAST_SELECTED" "$new_index" "$fs_path" "$max_items" "false"
                fi
-               _dir_fs_update_selection "$_DIR_LAST_SELECTED" "$new_index" "$fs_path" "$max_items" "false"
+               
                selected_index=$new_index
                _DIR_LAST_SELECTED=$selected_index
                ;;
@@ -441,7 +596,8 @@ _dir_fs_navigate_level() {
                        if [[ $nav_result -eq 0 ]]; then
                            return 99  # Exit script completely (only if cd was executed)
                        elif [[ $nav_result -eq 1 ]]; then
-                           # Came back from subdirectory
+                           # Came back from subdirectory - re-initialize scrolling
+                           _dir_init_scrolling
                            _dir_fs_render_full "$fs_path" "$selected_index"
                            _DIR_LAST_SELECTED=$selected_index
                            max_items=$(_dir_fs_get_item_count "$fs_path")
@@ -488,35 +644,9 @@ _dir_fs_navigate_level() {
            
            'v')
                # Open current directory in nvim
-               if [[ $max_items -gt 0 && $selected_index -gt 0 && $selected_index -le $max_items ]]; then
-                   local system_path=$(_dir_fs_to_system_path "$fs_path")
-                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
-                   
-                   # Get sorted list of subdirectories
-                   local dirs=()
-                   while IFS= read -r -d '' dir; do
-                       dirs+=("$(basename "$dir")")
-                   done < <(find "$system_path" -maxdepth 1 -type d ! -name ".*" ! -path "$system_path" -print0 2>/dev/null | sort -z)
-                   
-                   local selected_dir="${dirs[$((selected_index - 1))]}"
-                   local target_path="$system_path/$selected_dir"
-                   
-                   if [[ -d "$target_path" ]]; then
-                       _dir_cleanup
-                       nvim "$target_path"
-                       _DIR_EXIT_SCRIPT=true
-                       return 0
-                   fi
-               else
-                   # Open current directory if no selection
-                   local system_path=$(_dir_fs_to_system_path "$fs_path")
-                   system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
-                   if [[ -d "$system_path" ]]; then
-                       _dir_cleanup
-                       nvim "$system_path"
-                       _DIR_EXIT_SCRIPT=true
-                       return 0
-                   fi
+               _dir_fs_handle_vim_action "$fs_path" "$selected_index"
+               if [[ "$_DIR_EXIT_SCRIPT" == "true" ]]; then
+                   return 0
                fi
                ;;
        esac
@@ -525,82 +655,45 @@ _dir_fs_navigate_level() {
    done
 }
 
-# Render full filesystem view
-_dir_fs_render_full() {
+# Handle vim action for filesystem directories
+_dir_fs_handle_vim_action() {
    local fs_path="$1"
-   local selected_index="${2:-0}"
-   
-   # Clear screen and hide cursor
-   printf '\e[H\e[J\e[?25l'
-   
-   # Get current working directory for display
-   local cwd_display=$(pwd | sed "s|^$HOME|~|")
-   
-   # Render header with cwd (same as saved directories)
-   printf "${_DIR_COLOR_HEADER}Directory Navigator${_DIR_COLOR_RESET} ${_DIR_COLOR_BREADCRUMB}(cwd: %s)${_DIR_COLOR_RESET}\n" "$cwd_display"
-   printf "${_DIR_COLOR_HEADER}===================${_DIR_COLOR_RESET}\n"
-   echo
-   _DIR_HEADER_LINES=3
-   
-   # Render breadcrumb
-   printf "${_DIR_COLOR_BREADCRUMB}${_DIR_ICON_ARROW} %s${_DIR_COLOR_RESET}\n" "$(_dir_fs_get_breadcrumb_path "$fs_path")"
-   echo
-   _DIR_HEADER_LINES=$(((_DIR_HEADER_LINES + 2)))
-   
-   # Track where items start
-   _DIR_ITEM_START_LINE=$((_DIR_HEADER_LINES + 1))
-   
-   # Render filesystem items
-   _dir_fs_render_items "$fs_path" "$selected_index"
-   
-   # Calculate footer position
+   local selected_index="$2"
    local max_items=$(_dir_fs_get_item_count "$fs_path")
-   _DIR_FOOTER_START_LINE=$((_DIR_ITEM_START_LINE + max_items + 1))
    
-   # Render footer
-   echo
-   printf "${_DIR_COLOR_SHORTCUT}?=Help, q=Quit${_DIR_COLOR_RESET}\n"
-   
-   # Show cursor
-   printf '\e[?25h'
-}
-
-# Update filesystem selection
-_dir_fs_update_selection() {
-   local old_index="$1"
-   local new_index="$2"
-   local fs_path="$3"
-   local max_items="$4"
-   local number_mode="${5:-false}"
-   
-   # Hide cursor during updates
-   printf '\e[?25l'
-   
-   # Clear old selection (if valid)
-   if [[ $old_index -gt 0 && $old_index -le $max_items ]]; then
-       local old_line=$((_DIR_ITEM_START_LINE + old_index - 1))
-       printf '\e[%d;1H' "$old_line"
-       printf '  '
-   fi
-   
-   # Draw new selection (only if valid)
-   if [[ $new_index -gt 0 && $new_index -le $max_items ]]; then
-       local new_line=$((_DIR_ITEM_START_LINE + new_index - 1))
-       printf '\e[%d;1H' "$new_line"
+   # Open current directory in nvim
+   if [[ $max_items -gt 0 && $selected_index -gt 0 && $selected_index -le $max_items ]]; then
+       local system_path=$(_dir_fs_to_system_path "$fs_path")
+       system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
        
-       if [[ "$number_mode" == "true" ]]; then
-           printf "${_DIR_COLOR_NUMBER_MODE}${_DIR_ICON_SELECTED}${_DIR_COLOR_RESET}"
-       else
-           printf "${_DIR_ICON_SELECTED}"
+       # Get sorted list of subdirectories
+       local dirs=()
+       while IFS= read -r -d '' dir; do
+           dirs+=("$(basename "$dir")")
+       done < <(find "$system_path" -maxdepth 1 -type d ! -name ".*" ! -path "$system_path" -print0 2>/dev/null | sort -z)
+       
+       local selected_dir="${dirs[$((selected_index - 1))]}"
+       local target_path="$system_path/$selected_dir"
+       
+       if [[ -d "$target_path" ]]; then
+           _dir_cleanup
+           nvim "$target_path"
+           _DIR_EXIT_SCRIPT=true
+       fi
+   else
+       # Open current directory if no selection
+       local system_path=$(_dir_fs_to_system_path "$fs_path")
+       system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
+       if [[ -d "$system_path" ]]; then
+           _dir_cleanup
+           nvim "$system_path"
+           _DIR_EXIT_SCRIPT=true
        fi
    fi
-   
-   # Position cursor after footer
-   printf '\e[%d;1H\e[?25h' "$((_DIR_FOOTER_START_LINE + 1))"
 }
 
-# Handle number input for filesystem navigation
-_dir_fs_handle_number_input() {
+# Enhanced number input handling for filesystem navigation with scrolling
+_dir_fs_handle_number_input_enhanced() {
    local key="$1"
    local fs_path="$2"
    local current_selection="$3"
@@ -617,14 +710,58 @@ _dir_fs_handle_number_input() {
            
            local target_row=$(( 10#$_DIR_NUMBER_BUFFER ))
            if [[ $target_row -gt 0 && $target_row -le $max_items ]]; then
+               # Use smart scrolling for filesystem number input
+               _dir_smart_scroll "$target_row" "$max_items" "number"
                _dir_fs_update_selection "$current_selection" "$target_row" "$fs_path" "$max_items" "true"
                _DIR_NUMBER_TARGET_INDEX=$target_row
-               return 5  # Selection changed
+               return 5
            else
                _dir_fs_update_selection "$current_selection" "0" "$fs_path" "$max_items" "true"
                _DIR_NUMBER_TARGET_INDEX=0
-               return 0  # Stay in number mode
+               return 0
            fi
+           ;;
+           
+       "UP")
+           if [[ -n "$_DIR_NUMBER_BUFFER" ]]; then
+               local steps=$(( 10#$_DIR_NUMBER_BUFFER ))
+               # Count from ORIGINAL position, not current temporary position
+               local target=$((_DIR_ORIGINAL_SELECTION - steps))
+               if [[ $target -lt 1 ]]; then
+                   target=1
+               fi
+               _dir_reset_number_mode
+               
+               local final_selection=$(_dir_smart_scroll "$target" "$max_items" "number")
+               if [[ -n "$final_selection" ]]; then
+                   target=$final_selection
+               fi
+               
+               _DIR_NUMBER_TARGET_INDEX=$target
+               return 7
+           fi
+           return 1
+           ;;
+           
+       "DOWN")
+           if [[ -n "$_DIR_NUMBER_BUFFER" ]]; then
+               local steps=$(( 10#$_DIR_NUMBER_BUFFER ))
+               # Count from ORIGINAL position, not current temporary position
+               local target=$((_DIR_ORIGINAL_SELECTION + steps))
+               if [[ $target -gt $max_items ]]; then
+                   target=$max_items
+               fi
+               _dir_reset_number_mode
+               
+               local final_selection=$(_dir_smart_scroll "$target" "$max_items" "number")
+               if [[ -n "$final_selection" ]]; then
+                   target=$final_selection
+               fi
+               
+               _DIR_NUMBER_TARGET_INDEX=$target
+               return 7
+           fi
+           return 1
            ;;
            
        ""|\n'|\r')
@@ -633,7 +770,7 @@ _dir_fs_handle_number_input() {
                _dir_reset_number_mode
                
                if [[ $target_index -gt 0 && $target_index -le $max_items ]]; then
-                   # For Enter key, cd to directory and exit
+                   # For filesystem, Enter means cd to directory and exit
                    local system_path=$(_dir_fs_to_system_path "$fs_path")
                    system_path=$(echo "$system_path" | sed "s|^~|$HOME|")
                    

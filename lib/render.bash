@@ -19,21 +19,33 @@ _dir_update_selection() {
    # Hide cursor during updates
    printf '\e[?25l'
    
-   # Clear old selection (if valid)
-   if [[ $old_index -gt 0 && $old_index -le $max_items ]]; then
-       local old_line=$((_DIR_ITEM_START_LINE + old_index - 1))
-       printf '\e[%d;1H' "$old_line"
-       printf '  '
+   # Get visible range
+   local range=($(_dir_get_visible_range "$max_items"))
+   local visible_start=${range[0]}
+   local visible_end=${range[1]}
+   
+   # Calculate line positions within viewport
+   local viewport_offset=0
+   if [[ $visible_start -gt 1 ]]; then
+       viewport_offset=1  # Account for "... (X more above)" line
    fi
    
-   # Draw new selection (only if valid)
+   # Clear old selection (if valid and visible)
+   if [[ $old_index -gt 0 && $old_index -le $max_items ]]; then
+       if [[ $old_index -ge $visible_start && $old_index -le $visible_end ]]; then
+           local old_line=$((_DIR_ITEM_START_LINE + viewport_offset + old_index - visible_start))
+           printf '\e[%d;1H' "$old_line"
+           printf '  '
+       fi
+   fi
+   
+   # Draw new selection (only if valid and visible)
    if [[ $new_index -gt 0 && $new_index -le $max_items ]]; then
-       local new_line=$((_DIR_ITEM_START_LINE + new_index - 1))
-       printf '\e[%d;1H' "$new_line"
-       
-       if [[ "$number_mode" == "true" ]]; then
-           printf "${_DIR_COLOR_NUMBER_MODE}${_DIR_ICON_SELECTED}${_DIR_COLOR_RESET}"
-       else
+       if [[ $new_index -ge $visible_start && $new_index -le $visible_end ]]; then
+           local new_line=$((_DIR_ITEM_START_LINE + viewport_offset + new_index - visible_start))
+           printf '\e[%d;1H' "$new_line"
+           
+           # Always use normal selection indicator - no special number mode styling
            printf "${_DIR_ICON_SELECTED}"
        fi
    fi
@@ -75,12 +87,35 @@ _dir_render_full() {
    # Track where items start
    _DIR_ITEM_START_LINE=$((_DIR_HEADER_LINES + 1))
    
-   # Render all items
-   _dir_render_items "$path" "$selected_index"
-   
-   # Calculate footer position
+   # Get total item count and ensure viewport is properly positioned
    local max_items=$(_dir_get_item_count "$path")
-   _DIR_FOOTER_START_LINE=$((_DIR_ITEM_START_LINE + max_items + 1))
+   
+   # Adjust viewport if selection is out of bounds
+   if [[ $selected_index -gt 0 ]]; then
+       if ! _dir_is_in_viewport "$selected_index"; then
+           _dir_center_viewport_on "$selected_index" "$max_items"
+       fi
+   fi
+   
+   # Render all items with viewport
+   _dir_render_items_with_viewport "$path" "$selected_index" "$max_items"
+   
+   # Calculate footer position based on what was actually rendered
+   local range=($(_dir_get_visible_range "$max_items"))
+   local visible_start=${range[0]}
+   local visible_end=${range[1]}
+   local visible_count=$((visible_end - visible_start + 1))
+   
+   # Add space for scroll indicators
+   local scroll_indicator_lines=0
+   if [[ $visible_start -gt 1 ]]; then
+       ((scroll_indicator_lines++))
+   fi
+   if [[ $visible_end -lt $max_items ]]; then
+       ((scroll_indicator_lines++))
+   fi
+   
+   _DIR_FOOTER_START_LINE=$((_DIR_ITEM_START_LINE + visible_count + scroll_indicator_lines + 1))
    
    # Render footer with context-appropriate commands
    echo
@@ -90,22 +125,34 @@ _dir_render_full() {
    printf '\e[?25h'
 }
 
-# Render items without selection highlighting WITH virtual filesystem support
-_dir_render_items() {
+# Render items with viewport support - NEW FUNCTION
+_dir_render_items_with_viewport() {
    local path="$1"
    local selected_index="${2:-0}"
+   local max_items="$3"
    
    # Handle filesystem paths
    if _dir_is_filesystem_path "$path"; then
-       _dir_fs_render_items "$path" "$selected_index"
+       _dir_fs_render_items_with_viewport "$path" "$selected_index" "$max_items"
        return
    fi
    
-   local index=1
+   # Get visible range
+   local range=($(_dir_get_visible_range "$max_items"))
+   local visible_start=${range[0]}
+   local visible_end=${range[1]}
+   
+   # Show scroll indicator for items above
+   if [[ $visible_start -gt 1 ]]; then
+       printf "  ${_DIR_COLOR_BREADCRUMB}... (%d more above)${_DIR_COLOR_RESET}\n" $((visible_start - 1))
+   fi
+   
+   # Render visible items
+   local index=$visible_start
    local has_groups=$(_dir_has_groups "$path"; echo $?)
    
-   # Iterate through saved items
-   while [[ -n "${_dir_items["$path/$index"]}" || ( -z "$path" && -n "${_dir_items["/$index"]}" ) ]]; do
+   while [[ $index -le $visible_end ]]; do
+       # Handle saved items and virtual filesystem entry
        local item_path
        if [[ -z "$path" ]]; then
            item_path="/$index"
@@ -113,78 +160,92 @@ _dir_render_items() {
            item_path="$path/$index"
        fi
        
-       # Render with or without selection
-       if [[ $index -eq $selected_index ]]; then
-           if [[ "$_DIR_IN_NUMBER_MODE" == "true" ]]; then
-               printf "${_DIR_COLOR_NUMBER_MODE}${_DIR_ICON_SELECTED}${_DIR_COLOR_RESET} "
-           else
-               printf "${_DIR_ICON_SELECTED} "
-           fi
-       else
-           printf "  "
+       # Check if this item exists (might be virtual filesystem entry)
+       local item_exists=false
+       if [[ -n "${_dir_items["$item_path"]}" ]]; then
+           item_exists=true
+       elif [[ -z "$path" ]] && [[ $index -eq $max_items ]]; then
+           # This is the virtual filesystem entry at root
+           item_exists=true
        fi
        
-       # Render the item content with natural numbering
-       if [[ "${_dir_types["$item_path"]}" == "group" ]]; then
-           local indicator=""
-           if [[ "$_DIR_USE_ICONS" == true ]]; then
-               indicator="$_DIR_ICON_GROUP"
+       if [[ "$item_exists" == "true" ]]; then
+           # Render selection indicator
+           if [[ $index -eq $selected_index ]]; then
+               # Always use normal selection indicator - no number mode styling
+               printf "${_DIR_ICON_SELECTED} "
            else
-               indicator="$_DIR_TEXT_GROUP"
+               printf "  "
            fi
-           printf "${_DIR_COLOR_SHORTCUT}%d${_DIR_COLOR_RESET}  %s ${_DIR_COLOR_GROUP}%s${_DIR_COLOR_RESET} ${_DIR_COLOR_GROUP}(%d)${_DIR_COLOR_RESET}\n" \
-               "$index" "$indicator" "${_dir_names["$item_path"]}" "${_dir_counts["$item_path"]}"
-       else
-           local display_path=$(echo "${_dir_items["$item_path"]}" | sed "s|^$HOME|~|")
-           if [[ $has_groups -eq 0 ]]; then
-               # Has groups, show indicator
+           
+           # Render item content
+           if [[ -n "${_dir_items["$item_path"]}" ]]; then
+               # Regular saved item
+               if [[ "${_dir_types["$item_path"]}" == "group" ]]; then
+                   local indicator=""
+                   if [[ "$_DIR_USE_ICONS" == true ]]; then
+                       indicator="$_DIR_ICON_GROUP"
+                   else
+                       indicator="$_DIR_TEXT_GROUP"
+                   fi
+                   printf "${_DIR_COLOR_SHORTCUT}%d${_DIR_COLOR_RESET}  %s ${_DIR_COLOR_GROUP}%s${_DIR_COLOR_RESET} ${_DIR_COLOR_GROUP}(%d)${_DIR_COLOR_RESET}\n" \
+                       "$index" "$indicator" "${_dir_names["$item_path"]}" "${_dir_counts["$item_path"]}"
+               else
+                   local display_path=$(echo "${_dir_items["$item_path"]}" | sed "s|^$HOME|~|")
+                   if [[ $has_groups -eq 0 ]]; then
+                       # Has groups, show indicator
+                       local indicator=""
+                       if [[ "$_DIR_USE_ICONS" == true ]]; then
+                           indicator="$_DIR_ICON_DIR"
+                       else
+                           indicator="$_DIR_TEXT_DIR"
+                       fi
+                       printf "${_DIR_COLOR_SHORTCUT}%d${_DIR_COLOR_RESET}  %s ${_DIR_COLOR_DIR}%s${_DIR_COLOR_RESET}\n" \
+                           "$index" "$indicator" "$display_path"
+                   else
+                       # No groups, compact display
+                       printf "${_DIR_COLOR_SHORTCUT}%d${_DIR_COLOR_RESET}  ${_DIR_COLOR_DIR}%s${_DIR_COLOR_RESET}\n" \
+                           "$index" "$display_path"
+                   fi
+               fi
+           else
+               # Virtual filesystem entry
                local indicator=""
                if [[ "$_DIR_USE_ICONS" == true ]]; then
-                   indicator="$_DIR_ICON_DIR"
+                   indicator="🗂️"  # Different icon for filesystem browser
                else
-                   indicator="$_DIR_TEXT_DIR"
+                   indicator="[FS]"
                fi
-               printf "${_DIR_COLOR_SHORTCUT}%d${_DIR_COLOR_RESET}  %s ${_DIR_COLOR_DIR}%s${_DIR_COLOR_RESET}\n" \
-                   "$index" "$indicator" "$display_path"
-           else
-               # No groups, compact display
-               printf "${_DIR_COLOR_SHORTCUT}%d${_DIR_COLOR_RESET}  ${_DIR_COLOR_DIR}%s${_DIR_COLOR_RESET}\n" \
-                   "$index" "$display_path"
+               
+               # Get current working directory for display
+               local cwd_display=$(pwd | sed "s|^$HOME|~|")
+               printf "${_DIR_COLOR_SHORTCUT}%d${_DIR_COLOR_RESET}  %s ${_DIR_COLOR_BREADCRUMB}%s (browse filesystem)${_DIR_COLOR_RESET}\n" \
+                   "$index" "$indicator" "$cwd_display"
            fi
        fi
        
        ((index++))
    done
    
-   # Add virtual filesystem entry at root level
-   if [[ -z "$path" ]]; then
-       # Check if this is the selected item
-       if [[ $index -eq $selected_index ]]; then
-           if [[ "$_DIR_IN_NUMBER_MODE" == "true" ]]; then
-               printf "${_DIR_COLOR_NUMBER_MODE}${_DIR_ICON_SELECTED}${_DIR_COLOR_RESET} "
-           else
-               printf "${_DIR_ICON_SELECTED} "
-           fi
-       else
-           printf "  "
-       fi
-       
-       # Render virtual filesystem entry
-       local indicator=""
-       if [[ "$_DIR_USE_ICONS" == true ]]; then
-           indicator="🗂️"  # Different icon for filesystem browser
-       else
-           indicator="[FS]"
-       fi
-       
-       # Get current working directory for display
-       local cwd_display=$(pwd | sed "s|^$HOME|~|")
-       printf "${_DIR_COLOR_SHORTCUT}%d${_DIR_COLOR_RESET}  %s ${_DIR_COLOR_BREADCRUMB}%s (browse filesystem)${_DIR_COLOR_RESET}\n" \
-           "$index" "$indicator" "$cwd_display"
+   # Show scroll indicator for items below
+   if [[ $visible_end -lt $max_items ]]; then
+       printf "  ${_DIR_COLOR_BREADCRUMB}... (%d more below)${_DIR_COLOR_RESET}\n" $((max_items - visible_end))
    fi
 }
 
-# Show current directory level with optional selection highlighting
+# LEGACY FUNCTIONS - Keep for compatibility but mark as deprecated
+
+# Render items without selection highlighting WITHOUT viewport support (LEGACY)
+_dir_render_items() {
+   local path="$1"
+   local selected_index="${2:-0}"
+   
+   # Redirect to viewport version for consistency
+   local max_items=$(_dir_get_item_count "$path")
+   _dir_render_items_with_viewport "$path" "$selected_index" "$max_items"
+}
+
+# Show current directory level with optional selection highlighting (LEGACY)
 _dir_show_level() {
    local path="$1"
    local selected_index="${2:-0}"  # 0 means no selection
@@ -209,7 +270,7 @@ _dir_show_level() {
    fi
 }
 
-# Show root level directories with selection highlighting
+# Show root level directories with selection highlighting (LEGACY)
 _dir_show_root_level() {
    local selected_index="${1:-0}"
    local index=1
@@ -286,7 +347,7 @@ _dir_show_root_level() {
    done
 }
 
-# Show expanded level with parent context and selection highlighting
+# Show expanded level with parent context and selection highlighting (LEGACY)
 _dir_show_expanded_level() {
    local path="$1"
    local selected_index="${2:-0}"

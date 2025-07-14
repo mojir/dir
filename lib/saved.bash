@@ -13,7 +13,10 @@ _dir_navigate_saved_level() {
     _dir_reset_number_mode
     _DIR_LAST_KEY=""
     
-    # Initial full render
+    # Initialize viewport for this level
+    _dir_init_scrolling
+    
+    # Initial full render with smart viewport positioning
     _dir_render_full "$path" "$selected_index"
     _DIR_LAST_SELECTED=$selected_index
     
@@ -70,7 +73,7 @@ _dir_navigate_saved_level() {
             local result=$?
             
             case $result in
-                0) _DIR_LAST_KEY="$key"; continue ;;  # Stay in number mode
+                0) _DIR_LAST_KEY="$key"; continue ;;  # Stay in number mode, no visual changes
                 1) ;;  # Handle key normally (fall through)
                 2) _DIR_LAST_KEY="$key"; continue ;;  # Handled, continue loop
                 3) # Full redraw needed
@@ -93,15 +96,36 @@ _dir_navigate_saved_level() {
                     _DIR_LAST_KEY="$key"
                     continue
                     ;;
-                5) # Selection changed - update our tracking
+                7) # Number + directional movement
+                    local old_viewport_start=$_DIR_VIEWPORT_START
                     selected_index="$_DIR_NUMBER_TARGET_INDEX"
+                    
+                    # Check if viewport changed (scrolling occurred)
+                    if [[ $_DIR_VIEWPORT_START -ne $old_viewport_start ]]; then
+                        # Full re-render needed due to scrolling
+                        _dir_render_full "$path" "$selected_index"
+                    else
+                        # Just update selection indicator
+                        _dir_update_selection "$_DIR_LAST_SELECTED" "$selected_index" "$path" "$max_items" "false"
+                    fi
+                    
                     _DIR_LAST_SELECTED=$selected_index
                     _DIR_LAST_KEY="$key"
                     continue
                     ;;
-                6) # Escape - restore original selection and clear number mode
+                8) # Absolute positioning (number + g)
+                    local old_viewport_start=$_DIR_VIEWPORT_START
                     selected_index="$_DIR_NUMBER_TARGET_INDEX"
-                    _dir_update_selection "$_DIR_LAST_SELECTED" "$selected_index" "$path" "$max_items" "false"
+                    
+                    # Check if viewport changed (scrolling occurred)
+                    if [[ $_DIR_VIEWPORT_START -ne $old_viewport_start ]]; then
+                        # Full re-render needed due to scrolling
+                        _dir_render_full "$path" "$selected_index"
+                    else
+                        # Just update selection indicator
+                        _dir_update_selection "$_DIR_LAST_SELECTED" "$selected_index" "$path" "$max_items" "false"
+                    fi
+                    
                     _DIR_LAST_SELECTED=$selected_index
                     _DIR_LAST_KEY="$key"
                     continue
@@ -117,11 +141,8 @@ _dir_navigate_saved_level() {
             "ESC")
                 # ESC behavior: cancel number mode if active, otherwise go back one level
                 if [[ "$_DIR_IN_NUMBER_MODE" == "true" ]]; then
-                    # Cancel number mode and restore original selection
+                    # Cancel number mode
                     _dir_reset_number_mode
-                    _dir_update_selection "$selected_index" "$_DIR_ORIGINAL_SELECTION" "$path" "$max_items" "false"
-                    selected_index="$_DIR_ORIGINAL_SELECTION"
-                    _DIR_LAST_SELECTED=$selected_index
                 elif [[ -n "$path" ]]; then
                     # Go back one level (only if not at root)
                     return 1
@@ -135,9 +156,9 @@ _dir_navigate_saved_level() {
             
             'g')
                 if [[ "$_DIR_LAST_KEY" == "g" ]]; then
-                    # gg - go to first item
+                    # gg - go to first item with smart scrolling
                     if [[ $max_items -gt 0 ]]; then
-                        local new_index=1
+                        local new_index=$(_dir_handle_jump_navigation "first" "$max_items")
                         _dir_update_selection "$_DIR_LAST_SELECTED" "$new_index" "$path" "$max_items" "false"
                         selected_index=$new_index
                         _DIR_LAST_SELECTED=$selected_index
@@ -147,9 +168,9 @@ _dir_navigate_saved_level() {
                 ;;
             
             'G')
-                # G - go to last item
+                # G - go to last item with smart scrolling
                 if [[ $max_items -gt 0 ]]; then
-                    local new_index=$max_items
+                    local new_index=$(_dir_handle_jump_navigation "last" "$max_items")
                     _dir_update_selection "$_DIR_LAST_SELECTED" "$new_index" "$path" "$max_items" "false"
                     selected_index=$new_index
                     _DIR_LAST_SELECTED=$selected_index
@@ -159,7 +180,7 @@ _dir_navigate_saved_level() {
             '?')
                 # Show help screen
                 _dir_show_help "$path"
-                # Redraw after help
+                # Redraw after help - restore viewport state
                 _dir_render_full "$path" "$selected_index"
                 _DIR_LAST_SELECTED=$selected_index
                 ;;
@@ -196,6 +217,8 @@ _dir_navigate_saved_level() {
                     return 99  # Exit script completely after navigation
                 elif [[ $nav_result -eq 1 ]]; then
                     # Came back from group/filesystem navigation, stay in current level
+                    # Re-initialize scrolling state for return
+                    _dir_init_scrolling
                     _dir_render_full "$path" "$selected_index"
                     _DIR_LAST_SELECTED=$selected_index
                     max_items=$(_dir_get_item_count "$path")
@@ -215,12 +238,19 @@ _dir_navigate_saved_level() {
                     continue
                 fi
                 
-                local new_index=$((selected_index - 1))
-                if [[ $new_index -lt 1 ]]; then
-                    new_index=$max_items
+                # Use enhanced arrow navigation with smart scrolling
+                local old_viewport_start=$_DIR_VIEWPORT_START
+                local new_index=$(_dir_handle_arrow_navigation "$key" "$selected_index" "$max_items" "$path")
+                
+                # Check if viewport changed (scrolling occurred)
+                if [[ $_DIR_VIEWPORT_START -ne $old_viewport_start ]]; then
+                    # Full re-render needed due to scrolling
+                    _dir_render_full "$path" "$new_index"
+                else
+                    # Just update selection indicator
+                    _dir_update_selection "$_DIR_LAST_SELECTED" "$new_index" "$path" "$max_items" "false"
                 fi
                 
-                _dir_update_selection "$_DIR_LAST_SELECTED" "$new_index" "$path" "$max_items" "false"
                 selected_index=$new_index
                 _DIR_LAST_SELECTED=$selected_index
                 ;;
@@ -233,12 +263,19 @@ _dir_navigate_saved_level() {
                     continue
                 fi
                 
-                local new_index=$((selected_index + 1))
-                if [[ $new_index -gt $max_items ]]; then
-                    new_index=1
+                # Use enhanced arrow navigation with smart scrolling
+                local old_viewport_start=$_DIR_VIEWPORT_START
+                local new_index=$(_dir_handle_arrow_navigation "$key" "$selected_index" "$max_items" "$path")
+                
+                # Check if viewport changed (scrolling occurred)
+                if [[ $_DIR_VIEWPORT_START -ne $old_viewport_start ]]; then
+                    # Full re-render needed due to scrolling
+                    _dir_render_full "$path" "$new_index"
+                else
+                    # Just update selection indicator
+                    _dir_update_selection "$_DIR_LAST_SELECTED" "$new_index" "$path" "$max_items" "false"
                 fi
                 
-                _dir_update_selection "$_DIR_LAST_SELECTED" "$new_index" "$path" "$max_items" "false"
                 selected_index=$new_index
                 _DIR_LAST_SELECTED=$selected_index
                 ;;
@@ -261,6 +298,8 @@ _dir_navigate_saved_level() {
                     elif [[ $nav_result -eq 99 ]]; then
                         return 99  # Propagate exit signal
                     fi
+                    # Re-initialize scrolling state when returning from filesystem
+                    _dir_init_scrolling
                     _dir_render_full "$path" "$selected_index"
                     _DIR_LAST_SELECTED=$selected_index
                     max_items=$(_dir_get_item_count "$path")
@@ -284,6 +323,8 @@ _dir_navigate_saved_level() {
                     elif [[ $nav_result -eq 99 ]]; then
                         return 99  # Propagate exit signal
                     fi
+                    # Re-initialize scrolling state when returning from group
+                    _dir_init_scrolling
                     _dir_render_full "$path" "$selected_index"
                     _DIR_LAST_SELECTED=$selected_index
                     max_items=$(_dir_get_item_count "$path")
@@ -319,6 +360,8 @@ _dir_navigate_saved_level() {
                         'c') _dir_clean_config ;;
                         'e') _dir_edit_config ;;
                     esac
+                    # Re-initialize scrolling and render after config changes
+                    _dir_init_scrolling
                     _dir_render_full "$path" 1
                     max_items=$(_dir_get_item_count "$path")
                     selected_index=1
@@ -383,7 +426,7 @@ _dir_handle_saved_vim_action() {
     fi
 }
 
-# Handle number input for saved directories navigation
+# Handle number input for saved directories navigation with clean input
 _dir_handle_saved_number_input() {
     local key="$1"
     local path="$2"
@@ -394,29 +437,84 @@ _dir_handle_saved_number_input() {
         [0-9])
             if [[ "$_DIR_IN_NUMBER_MODE" == "false" ]]; then
                 _DIR_ORIGINAL_SELECTION=$current_selection
+                _DIR_IN_NUMBER_MODE=true
             fi
             
+            # Just add digit to buffer - no visual changes
             _DIR_NUMBER_BUFFER="${_DIR_NUMBER_BUFFER}${key}"
-            _DIR_IN_NUMBER_MODE=true
+            return 0  # Stay in number mode, no visual changes
+            ;;
             
-            local target_row=$(( 10#$_DIR_NUMBER_BUFFER ))
-            if [[ $target_row -gt 0 && $target_row -le $max_items ]]; then
-                _dir_update_selection "$current_selection" "$target_row" "$path" "$max_items" "true"
-                _DIR_NUMBER_TARGET_INDEX=$target_row
-                return 5
-            else
-                _dir_update_selection "$current_selection" "0" "$path" "$max_items" "true"
-                _DIR_NUMBER_TARGET_INDEX=0
-                return 0
+        "UP"|'k')
+            # Handle number + up arrow for directional movement
+            if [[ -n "$_DIR_NUMBER_BUFFER" ]]; then
+                local steps=$(( 10#$_DIR_NUMBER_BUFFER ))
+                # Count from ORIGINAL position
+                local target=$((_DIR_ORIGINAL_SELECTION - steps))
+                if [[ $target -lt 1 ]]; then
+                    target=1  # Clamp to beginning, no wrap
+                fi
+                _dir_reset_number_mode
+                
+                # Use smart scrolling for number + directional movement
+                local final_selection=$(_dir_smart_scroll "$target" "$max_items" "number")
+                if [[ -n "$final_selection" ]]; then
+                    target=$final_selection
+                fi
+                
+                _DIR_NUMBER_TARGET_INDEX=$target
+                return 7  # Signal number + directional movement
             fi
+            return 1  # Handle as normal arrow
+            ;;
+            
+        "DOWN"|'j')
+            # Handle number + down arrow for directional movement
+            if [[ -n "$_DIR_NUMBER_BUFFER" ]]; then
+                local steps=$(( 10#$_DIR_NUMBER_BUFFER ))
+                # Count from ORIGINAL position
+                local target=$((_DIR_ORIGINAL_SELECTION + steps))
+                if [[ $target -gt $max_items ]]; then
+                    target=$max_items  # Clamp to end, no wrap
+                fi
+                _dir_reset_number_mode
+                
+                # Use smart scrolling for number + directional movement
+                local final_selection=$(_dir_smart_scroll "$target" "$max_items" "number")
+                if [[ -n "$final_selection" ]]; then
+                    target=$final_selection
+                fi
+                
+                _DIR_NUMBER_TARGET_INDEX=$target
+                return 7  # Signal number + directional movement
+            fi
+            return 1  # Handle as normal arrow
+            ;;
+            
+        'g')
+            # Handle number + g for absolute positioning
+            if [[ -n "$_DIR_NUMBER_BUFFER" ]]; then
+                local target_index=$(( 10#$_DIR_NUMBER_BUFFER ))
+                _dir_reset_number_mode
+                
+                if [[ $target_index -gt 0 && $target_index -le $max_items ]]; then
+                    # Use smart scrolling for absolute jump
+                    _dir_smart_scroll "$target_index" "$max_items" "jump"
+                    _DIR_NUMBER_TARGET_INDEX=$target_index
+                    return 8  # Signal absolute positioning
+                fi
+            fi
+            return 1  # Handle as normal 'g' (for gg)
             ;;
             
         ""|$'\n'|$'\r')
             if [[ -n "$_DIR_NUMBER_BUFFER" ]]; then
-                local target_index="$_DIR_NUMBER_BUFFER"
+                local target_index=$(( 10#$_DIR_NUMBER_BUFFER ))
                 _dir_reset_number_mode
                 
                 if [[ $target_index -gt 0 && $target_index -le $max_items ]]; then
+                    # Use smart scrolling for jump navigation
+                    _dir_smart_scroll "$target_index" "$max_items" "jump"
                     _dir_handle_navigation_by_index "$path" "$target_index"
                     local nav_result=$?
                     if [[ "$_DIR_EXIT_SCRIPT" == "true" ]]; then
@@ -447,7 +545,7 @@ _dir_handle_saved_number_input() {
             
         'd')
             if [[ -n "$_DIR_NUMBER_BUFFER" ]]; then
-                local target_index="$_DIR_NUMBER_BUFFER"
+                local target_index=$(( 10#$_DIR_NUMBER_BUFFER ))
                 _dir_reset_number_mode
                 
                 if [[ $target_index -gt 0 && $target_index -le $max_items ]]; then
@@ -463,7 +561,7 @@ _dir_handle_saved_number_input() {
             
         'v')
             if [[ -n "$_DIR_NUMBER_BUFFER" ]]; then
-                local target_index="$_DIR_NUMBER_BUFFER"
+                local target_index=$(( 10#$_DIR_NUMBER_BUFFER ))
                 _dir_reset_number_mode
                 
                 if [[ $target_index -gt 0 && $target_index -le $max_items ]]; then
@@ -477,14 +575,12 @@ _dir_handle_saved_number_input() {
             
         "ESC")
             _dir_reset_number_mode
-            _DIR_NUMBER_TARGET_INDEX=$_DIR_ORIGINAL_SELECTION
-            return 6
+            return 1  # Handle normally
             ;;
             
         *)
             _dir_reset_number_mode
-            _dir_update_selection "$current_selection" "$current_selection" "$path" "$max_items" "false"
-            return 1
+            return 1  # Handle key normally
             ;;
     esac
 }
